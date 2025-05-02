@@ -5,8 +5,9 @@ from typing import List, Dict, Any, TypedDict
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_mongodb import MongoDBAtlasVectorSearch
-from langchain_cohere import CohereEmbeddings
+from langchain_cohere import CohereEmbeddings, CohereRerank
 from langchain_groq import ChatGroq
+from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
 from pymongo import MongoClient
 from pymongo.operations import SearchIndexModel
 import tempfile
@@ -20,6 +21,8 @@ from langchain_community.document_loaders import (
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langgraph.graph import StateGraph, START
 from langchain_core.prompts import ChatPromptTemplate
+from streamlit_pdf_viewer import pdf_viewer
+
 
 # Set page configuration
 st.set_page_config(page_title="RAG_Bot", layout="wide")
@@ -62,7 +65,8 @@ class RAGEngine:
         # Initialize embeddings and LLM
         api_key = st.secrets["COHERE_API_KEY"]
         os.environ["COHERE_API_KEY"] = api_key
-        self.embeddings = CohereEmbeddings(model="embed-multilingual-v3.0")
+        #self.embeddings = CohereEmbeddings(model="embed-multilingual-v3.0")
+        self.embeddings = CohereEmbeddings(model="embed-english-v3.0")
 
         self.llm = ChatGroq(
             model = "meta-llama/llama-4-scout-17b-16e-instruct", # "llama3-8b-8192",
@@ -71,8 +75,8 @@ class RAGEngine:
         )
 
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,
-            chunk_overlap=200
+            chunk_size=1000,
+            chunk_overlap=100
         )
 
     def get_document_loader(self, file_path, file_type):
@@ -91,6 +95,7 @@ class RAGEngine:
     def setup_vectorstore(self, uploaded_file):
         """Process an uploaded file and create a vectorstore"""
         file_type = uploaded_file.name.split(".")[-1].lower()
+        original_filename = uploaded_file.name.replace(".", "_")  # Use original filename for collection name
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_type}") as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
@@ -102,11 +107,40 @@ class RAGEngine:
             documents = loader.load()
             texts = self.text_splitter.split_documents(documents)
 
-            # Create a new collection for this upload
-            collection_name = f"doc_{datetime.now().strftime('%Y%m%d%H%M')}"
+            # Create a new collection for this upload using original filename
+            collection_name = f"{original_filename}_{datetime.now().strftime('%Y%m%d%H%M')}"
+            # Replace any invalid characters for MongoDB collection names
+            collection_name = collection_name.replace("/", "_").replace("\\", "_").replace(" ", "_")
             collection = self.client[self.db_name][collection_name]
 
-            # create index search
+            # Create vectorstore
+            vector_store = MongoDBAtlasVectorSearch(
+                collection=collection,
+                embedding=self.embeddings,
+                relevance_score_fn="cosine"
+            )
+
+            # Add documents to VectorStore with metadata if PDF
+            if file_type == "pdf":
+                # Create PDF metadata
+                pdf_id = str(uuid.uuid4())[:8]
+                metadatas = []
+
+                for i, doc in enumerate(texts):
+                    meta = {
+                        "source_page": doc.metadata.get("page", i + 1),
+                        "title": f"Document {pdf_id}",
+                        "chunk_count": len(texts)
+                    }
+                    metadatas.append(meta)
+
+                ids = [f"id_{i}" for i in range(len(texts))]
+                vector_store.add_documents(documents=texts, ids=ids, metadatas=metadatas)
+            else:
+                ids = [f"id_{i}" for i in range(len(texts))]
+                vector_store.add_documents(documents=texts, ids=ids)
+
+            # Now create index search after documents are added
             search_index_model = SearchIndexModel(
                 definition={
                     "fields": [
@@ -115,29 +149,27 @@ class RAGEngine:
                             "numDimensions": 1024,
                             "path": "embedding",
                             "similarity": "cosine"
+                        },
+                        {
+                          "type": "filter",
+                          "path": "source_page"
                         }
                     ]
                 },
                 name=f"{collection_name}_index",
                 type="vectorSearch"
             )
+
             result = collection.create_search_index(model=search_index_model)
             print("New search index named " + result + " is building.")
 
-            # Create vectorstore
+            # Update the vector store with the index name
             vector_store = MongoDBAtlasVectorSearch(
                 collection=collection,
                 embedding=self.embeddings,
                 index_name=f"{collection_name}_index",
                 relevance_score_fn="cosine"
             )
-
-            # Add documents to vectorstore
-            ids = [str(uuid.uuid4()) for _ in range(len(texts))]
-            vector_store.add_documents(documents=texts, ids=ids)
-
-            # Create vector search index (dimensions for Cohere embed-multilingual-v3.0)
-            vector_store.create_vector_search_index(dimensions=1024)
 
             return vector_store, collection_name
 
@@ -146,11 +178,24 @@ class RAGEngine:
             os.unlink(tmp_file_path)
 
     def setup_retriever(self, vectorstore):
-        """Set up a retriever from the vectorstore"""
-        return vectorstore.as_retriever(
+        """Set up a retriever from the vectorstore with Cohere reranking"""
+        # Set up base retriever
+        base_retriever = vectorstore.as_retriever(
             search_type="similarity",
-            search_kwargs={"k": 6}
+            search_kwargs={"k": 12}  # Retrieve more documents initially for reranking
         )
+
+        # Set up Cohere reranker
+        compressor = CohereRerank(model="rerank-multilingual-v3.0")
+
+        # Create contextual compression retriever
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=compressor,
+            base_retriever=base_retriever,
+            search_kwargs={"k": 6}  # Return top 6 after reranking
+        )
+
+        return compression_retriever
 
     def setup_conversation(self, vector_store):
         """Set up a LangGraph conversation chain with the vector store"""
@@ -203,7 +248,7 @@ class RAGEngine:
 # UI Components
 def sidebar():
     with st.sidebar:
-        st.subheader("📚 RAG Bot - Upload & Process Documents")
+        st.subheader("📚 RAG Bot - :orange-background[Bases de Connaissances] ", divider='orange')
 
         # Initialize RAG engine
         rag_engine = RAGEngine()
@@ -216,7 +261,16 @@ def sidebar():
 
         # Process button
         if uploaded_file:
-            if st.button("Process Document", use_container_width=True):
+            # Display PDF viewer if PDF
+            if uploaded_file.name.endswith(".pdf"):
+                # Save the uploaded PDF to a temporary file for viewing
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_pdf_path = tmp_file.name
+                # Display the PDF
+                pdf_viewer(tmp_pdf_path, height=380)
+
+            if st.button("♻️ Index Document", use_container_width=True, type='primary'):
                 with st.spinner("❇️ Indexation du Document..."):
                     # Process uploaded document
                     vectorstore, collection_name = rag_engine.setup_vectorstore(uploaded_file)
@@ -235,11 +289,11 @@ def sidebar():
                     st.session_state.memory = memory
 
                     st.success(f"✅ Document traité : {uploaded_file.name}")
-                    st.info(f"Collection créée : {collection_name}")
+                    st.info(f"📋 Base de Connaissance créée : {collection_name}")
 
         # Clear chat button
         if st.session_state.conversation is not None:
-            if st.button("Initialiser le Chat", use_container_width=True):
+            if st.button("Re-Initialiser le Chat", use_container_width=True):
                 st.session_state.messages = []
                 st.session_state.chat_history = []
                 st.rerun()
@@ -307,7 +361,7 @@ def main():
         2. Cliquez sur le bouton "Process Document" pour traiter le document.
         3. Une fois traité, vous pourrez poser des questions sur votre document.
 
-        Ce chatbot utilise MongoDB Atlas Vector Search, Cohere embeddings, et Groq LLM pour fournir des réponses pertinentes à partir de vos documents.
+        🧩 Ce chatbot utilise MongoDB Atlas Vector Search, Cohere embeddings, et Groq LLM pour fournir des réponses pertinentes à partir de vos documents.
         """)
     else:
         chat_interface()
