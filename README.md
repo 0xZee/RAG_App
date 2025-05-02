@@ -1,15 +1,17 @@
 # Document RAG Assistant Suite
 
-A suite of Streamlit applications that enable conversational interactions with document collections using Retrieval-Augmented Generation (RAG).
+A suite of Streamlit applications that enable conversational interactions with document collections using Reranking Retrieval-Augmented Generation (RAG).
 
 ## 🌟 Overview
 
 This project consists of two complementary Streamlit applications:
 
 1. **RAG_Bot** - Upload and process new documents to create searchable knowledge bases.
-2. **Doc_Bot** - Connect to existing document collections and query them conversationally.
-
 ![RAG BOT](sc_rag_1.png)
+
+2. **Doc_Bot** - Connect to existing document collections and query them conversationally.
+![RAG BOT](sc_rag_0.png)
+
 
 Both applications utilize MongoDB Atlas Vector Search for document storage and retrieval, Cohere for embeddings, and Groq LLM for generating high-quality responses in French.
 
@@ -36,7 +38,7 @@ Both applications utilize MongoDB Atlas Vector Search for document storage and r
 - **Vector Database**: MongoDB Atlas Vector Search
 - **Embeddings**: Cohere (embed-multilingual-v3.0)
 - **LLM**: Groq (meta-llama/llama-4-scout-17b-16e-instruct)
-- **RAG Framework**: LangChain + LangGraph
+- **RAG Framework**: LangChain + LangGraph + Re-Ranking RAG 
 - **Document Processing**: LangChain document loaders
 
 ## 📋 Requirements
