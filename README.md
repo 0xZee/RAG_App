@@ -9,6 +9,8 @@ This project consists of two complementary Streamlit applications:
 1. **RAG_Bot** - Upload and process new documents to create searchable knowledge bases.
 2. **Doc_Bot** - Connect to existing document collections and query them conversationally.
 
+![RAG BOT](sc_rag_1.png)
+
 Both applications utilize MongoDB Atlas Vector Search for document storage and retrieval, Cohere for embeddings, and Groq LLM for generating high-quality responses in French.
 
 ## 🚀 Features
